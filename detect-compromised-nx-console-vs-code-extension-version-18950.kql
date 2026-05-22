@@ -1,0 +1,103 @@
+// Title: Detect Nx Console VS Code Extension Version 18.95.0
+// Author: Daniel Jeremiah
+// Date: 2026-05-22
+// Platform: Microsoft Defender XDR Advanced Hunting
+// Tables: DeviceFileEvents, DeviceProcessEvents
+//
+// Description:
+// This query identifies devices and users where the compromised Nx Console VS Code extension
+// version 18.95.0 was observed in the local VS Code extensions directory or referenced in
+// process command-line activity.
+//
+// The detection focuses only on the affected version:
+// nrwl.angular-console-18.95.0
+//
+// This query combines two evidence sources:
+// 1. DeviceFileEvents: confirms file or folder activity related to the extension path.
+// 2. DeviceProcessEvents: confirms execution or command-line reference involving the extension.
+//
+// Background:
+// Nx confirmed that Nx Console v18.95.0 was maliciously published to the Visual Studio Marketplace
+// and Open VSX registry on 2026-05-18 between 12:30 and 13:09 UTC. According to the postmortem,
+// v18.95.0 is the affected version exactly. Earlier and later versions were not affected.
+// Machines with this version should be treated as potentially compromised or can lead to exploitation.
+//
+// MITRE ATT&CK mapping:
+// T1195.002  Compromise Software Supply Chain
+// T1552      Unsecured Credentials
+// T1059      Command and Scripting Interpreter
+// T1041      Exfiltration Over C2 Channel
+//
+// References:
+// https://nx.dev/blog/nx-console-v18-95-0-postmortem
+// https://github.com/nrwl/nx-console/issues/3139
+// https://github.com/advisories/GHSA-c9j4-9m59-847w
+//
+// Notes:
+// This query does not prove malware execution by itself. It identifies presence or execution
+// evidence linked to the compromised extension version. File evidence should be treated as
+// exposure evidence, while process evidence provides stronger indication that the extension
+// or related files were invoked.
+
+let Lookback = 30d;
+let TargetExtension = @"nrwl.angular-console-18.95.0";
+let FileEvidence =
+DeviceFileEvents
+| where Timestamp > ago(Lookback)
+| where FolderPath contains @"\.vscode\extensions\nrwl.angular-console-18.95.0"
+| extend EvidenceType = "File evidence"
+| extend EvidenceSource = "DeviceFileEvents"
+| extend EvidencePath = FolderPath
+| extend InstalledUser = extract(@"(?i)\\Users\\([^\\]+)\\\.vscode\\extensions\\nrwl\.angular-console-18\.95\.0", 1, FolderPath)
+| extend ExtensionName = "nrwl.angular-console-18.95.0"
+| extend ExtensionVersion = "18.95.0"
+| project
+    Timestamp,
+    DeviceName,
+    InstalledUser,
+    AccountName = InitiatingProcessAccountName,
+    EvidenceType,
+    EvidenceSource,
+    ActionType,
+    ExtensionName,
+    ExtensionVersion,
+    FileName,
+    EvidencePath,
+    ProcessCommandLine = InitiatingProcessCommandLine;
+let ProcessEvidence =
+DeviceProcessEvents
+| where Timestamp > ago(Lookback)
+| extend CmdLine = coalesce(ProcessCommandLine, InitiatingProcessCommandLine)
+| where CmdLine contains @"\.vscode\extensions\nrwl.angular-console-18.95.0"
+| extend EvidenceType = "Process execution"
+| extend EvidenceSource = "DeviceProcessEvents"
+| extend EvidencePath = CmdLine
+| extend InstalledUser = extract(@"(?i)\\Users\\([^\\]+)\\\.vscode\\extensions\\nrwl\.angular-console-18\.95\.0", 1, CmdLine)
+| extend ExtensionName = "nrwl.angular-console-18.95.0"
+| extend ExtensionVersion = "18.95.0"
+| project
+    Timestamp,
+    DeviceName,
+    InstalledUser,
+    AccountName,
+    EvidenceType,
+    EvidenceSource,
+    ActionType,
+    ExtensionName,
+    ExtensionVersion,
+    FileName,
+    EvidencePath,
+    ProcessCommandLine;
+union FileEvidence, ProcessEvidence
+| summarize
+    FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp),
+    EventCount = count(),
+    EvidenceTypes = make_set(EvidenceType),
+    EvidenceSources = make_set(EvidenceSource),
+    ActionTypes = make_set(ActionType),
+    SampleFileNames = make_set(FileName, 5),
+    SampleEvidence = make_set(EvidencePath, 5),
+    SampleCommandLines = make_set(ProcessCommandLine, 5)
+    by DeviceName, InstalledUser, AccountName, ExtensionName, ExtensionVersion
+| sort by LastSeen desc
